@@ -10,3 +10,4 @@ if __name__ == "__main__":
     # 这里模拟一些数据处理
     print(f"当前 Python 路径: {sys.executable}")
     print("完成。")
+    print("test")
