@@ -1,6 +1,19 @@
 import os
 from pathlib import Path
 
+# ==========================================
+# 🚀 强制开启代理 (解决 Yahoo/FMP 连不上的问题)
+# 请根据你的实际情况修改端口号 (比如 7890 或 10809)
+# ==========================================
+PROXY_PORT = "7897"  # <--- 请确认这里的数字！
+os.environ["HTTP_PROXY"] = f"http://127.0.0.1:{PROXY_PORT}"
+os.environ["HTTPS_PROXY"] = f"http://127.0.0.1:{PROXY_PORT}"
+print(f"🌍 已配置网络代理: 127.0.0.1:{PROXY_PORT}")
+
+# ... (后面是你原有的 ROOT_DIR 等代码) ...
+ROOT_DIR = Path(__file__).parent.parent
+# ...
+
 # 获取项目根目录的绝对路径
 ROOT_DIR = Path(__file__).parent.parent
 DATA_DIR = ROOT_DIR / "data"

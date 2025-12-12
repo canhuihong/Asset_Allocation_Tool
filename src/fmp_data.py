@@ -1,105 +1,95 @@
 import time
-import requests
+import yfinance as yf
 import pandas as pd
-from pathlib import Path
-from src.config import FMP_API_KEY, FMP_BASE_URL, FUNDAMENTAL_DIR
+from src.config import FUNDAMENTAL_DIR
 
 class FMPDataManager:
+    """
+    (注：类名保留没改，方便兼容 main.py，实际底层已换成 Yahoo Finance)
+    负责获取个股的财务数据：
+    1. 账面价值 (Book Value) -> 来自资产负债表
+    2. 流通股本 (Shares Outstanding) -> 用于计算市值
+    """
+    
     def __init__(self):
-        self.api_key = FMP_API_KEY
-        self.base_url = FMP_BASE_URL
+        # yfinance 不需要 API Key
+        pass
         
     def get_fama_french_fundamentals(self, symbol, force_update=False):
         """
-        获取构建 FF 因子所需的关键数据：
-        1. Total Stockholders Equity (用于计算 Book Value)
-        2. Market Capitalization (用于计算 Size 和 B/M)
-        
-        返回: DataFrame (Date, Symbol, BookValue, MarketCap)
+        获取构建 FF 因子所需的关键数据。
+        Yahoo Finance 免费版通常能提供最近 4-5 年的年报。
         """
+        # 针对 yfinance 的 ticker 格式修正 (比如 BRK B -> BRK-B)
+        yf_symbol = symbol.replace(' ', '-')
         local_path = FUNDAMENTAL_DIR / f"{symbol}_fundamentals.csv"
         
-        # 1. 缓存检查：如果本地有且不强制更新，直接读取
+        # 1. 缓存检查
         if local_path.exists() and not force_update:
-            # print(f"📦 加载本地基本面缓存: {symbol}") # 减少日志噪音
+            # print(f"📦 加载本地缓存: {symbol}")
             return pd.read_csv(local_path, parse_dates=['date'])
             
-        print(f"🌐 正在下载 FMP 基本面数据: {symbol} ...")
+        print(f"🌐 (Yahoo) 正在下载基本面数据: {symbol} ...")
         
         try:
-            # 2. 获取资产负债表 (Balance Sheet) - 年频
-            # Fama-French 通常使用年度财报数据
-            bs_data = self._fetch_api(f"balance-sheet-statement/{symbol}", params={'limit': 20})
+            # 2. 调用 yfinance
+            stock = yf.Ticker(yf_symbol)
             
-            # 3. 获取历史市值 (Historical Market Cap) - 日频但我们只需要每年的
-            # 注意：这里我们取足够长的数据来覆盖财报日期
-            cap_data = self._fetch_api(f"historical-market-capitalization/{symbol}", params={'limit': 5000}) 
+            # 获取资产负债表 (Balance Sheet) - 年频
+            # yfinance 返回的表格：列是日期，行是科目
+            bs = stock.balance_sheet.T # 转置一下，变成 日期 x 科目
             
-            if not bs_data or not cap_data:
-                print(f"⚠️ {symbol} 数据缺失")
+            if bs.empty:
+                print(f"⚠️ {symbol} 暂无财务数据 (Yahoo源)")
                 return None
-
-            # 4. 数据清洗与合并 (Data Engineering 核心)
-            df_bs = pd.DataFrame(bs_data)
-            df_cap = pd.DataFrame(cap_data)
             
-            # 统一日期格式
-            df_bs['date'] = pd.to_datetime(df_bs['date'])
-            df_cap['date'] = pd.to_datetime(df_cap['date'])
+            # 3. 提取 股东权益 (Total Stockholder Equity)
+            # Yahoo 的字段名通常叫 "Stockholders Equity" 或 "Total Stockholder Equity"
+            target_col = None
+            possible_names = ['Stockholders Equity', 'Total Stockholder Equity', 'Total Equity Gross Minority Interest']
             
-            # 提取关键字段：股东权益 (Total Stockholders Equity)
-            # 有些公司可能字段名不同，这里做个简单容错
-            if 'totalStockholdersEquity' in df_bs.columns:
-                df_bs = df_bs[['date', 'totalStockholdersEquity', 'symbol']].copy()
-                df_bs.rename(columns={'totalStockholdersEquity': 'book_value'}, inplace=True)
-            else:
+            for name in possible_names:
+                if name in bs.columns:
+                    target_col = name
+                    break
+            
+            if not target_col:
                 print(f"❌ {symbol} 找不到股东权益字段")
                 return None
-
-            # 处理市值：我们需要财报发布当且日或年末的市值
-            # 为了简化，我们这里通过 merge_asof (近似匹配) 来找到财报日期的市值
-            df_cap = df_cap[['date', 'marketCap']].sort_values('date')
-            df_bs = df_bs.sort_values('date')
-            
-            # merge_asof: 在财报日期，找最近的一个市值数据 (向后找或向前找)
-            # direction='nearest' 表示找离财报日期最近的那个交易日的市值
-            df_merged = pd.merge_asof(
-                df_bs, 
-                df_cap, 
-                on='date', 
-                direction='nearest', 
-                tolerance=pd.Timedelta(days=7) # 容忍前后7天内的误差
-            )
-            
-            # 5. 保存到本地 (CSV)
-            df_merged.to_csv(local_path, index=False)
-            
-            # 6. 礼貌性休眠 (防封号)
-            time.sleep(0.2)
-            
-            return df_merged
-
-        except Exception as e:
-            print(f"❌ 处理 {symbol} 基本面数据时出错: {e}")
-            return None
-
-    def _fetch_api(self, endpoint, params=None):
-        """内部方法：封装 Requests 请求，处理异常"""
-        if params is None:
-            params = {}
-        params['apikey'] = self.api_key
-        
-        url = f"{self.base_url}/{endpoint}"
-        try:
-            response = requests.get(url, params=params, timeout=10)
-            if response.status_code == 200:
-                return response.json()
-            elif response.status_code == 403:
-                print("❌ API Key 无效或额度用尽")
-                return []
+                
+            # 4. 提取 流通股本 (Shares Outstanding)
+            # yfinance 的 shares 只有当前的，历史 shares 很难找。
+            # 替代方案：用 "Ordinary Shares Number" 字段 (如果有)
+            # 如果没有，我们暂时用当前的 shares 倒推 (这是免费数据的妥协)
+            shares_col = 'Ordinary Shares Number'
+            if shares_col not in bs.columns:
+                # 如果财报里没写股本，就用当前股本填充 (虽然不严谨，但为了跑通项目先这样)
+                current_shares = stock.info.get('sharesOutstanding', 0)
+                bs['shares'] = current_shares
             else:
-                print(f"⚠️ API 请求失败: {response.status_code}")
-                return []
+                bs['shares'] = bs[shares_col]
+
+            # 5. 数据清洗
+            df = pd.DataFrame()
+            df['date'] = bs.index
+            df['book_value'] = bs[target_col].values
+            df['shares'] = bs['shares'].values
+            df['symbol'] = symbol
+            
+            # 这里的市值 Market Cap 我们需要自己算：Price * Shares
+            # 但由于这里是“年报日”，我们可以简单存储 shares，留给 factor_engine 去结合每日股价算市值
+            # 为了兼容之前的逻辑，我们这里暂不存 marketCap，或者存一个占位符
+            # 在 factor_engine 里，我们会用 (Close Price * Shares) 来计算每日动态市值
+            
+            # 保存
+            df.sort_values('date', inplace=True)
+            df.to_csv(local_path, index=False)
+            
+            # 礼貌性休眠
+            time.sleep(0.5)
+            
+            return df
+
         except Exception as e:
-            print(f"❌ 网络请求异常: {e}")
-            return []
+            print(f"❌ 处理 {symbol} 失败: {e}")
+            return None
