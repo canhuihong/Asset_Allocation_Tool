@@ -26,5 +26,3 @@ if __name__ == "__main__":
     # 自我测试
     data = get_stock_returns()
     print(data.head())
-
-print(" ")
