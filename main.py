@@ -105,7 +105,7 @@ def main():
     logger.info("\n--- Phase 3: Micro Attribution ---")
     try:
         pa = PortfolioAnalyzer()
-        fig = pa.analyze(my_portfolio)
+        fig = pa.rolling_analyze(my_portfolio)
         if fig: reporter.add_figure(fig, "micro_attribution")
     except Exception as e: logger.error(f"Phase 4 Error: {e}")
 
