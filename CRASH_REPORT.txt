@@ -1,0 +1,11 @@
+【崩溃阶段】: 加载/运行阶段
+==============================
+【错误信息】:
+Traceback (most recent call last):
+  File "c:\PYL\debug_launcher.py", line 55, in <module>
+    import main
+  File "c:\PYL\main.py", line 9, in <module>
+    from src.config import DATA_DIR, OUTPUT_DIR
+ImportError: cannot import name 'OUTPUT_DIR' from 'src.config' (c:\PYL\src\config.py)
+
+==============================

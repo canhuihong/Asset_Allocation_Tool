@@ -1,13 +1,57 @@
-# 忽略 Python 缓存文件
+# Environment
+.env
+.env.local
+.venv/
+venv/
+ENV/
+
+# Data and outputs
+data/prices/
+data/fundamentals/
+outputs/
+data/quant_lab.db
+
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
-# 忽略 VS Code 设置文件 (可选，如果你不想同步个人设置)
-.vscode/
-
-# 忽略大型数据文件 (根据你的需求)
-data/*.xlsx
-data/*.csv
-
-# 忽略 Jupyter Notebook 的检查点
+# Jupyter & Notebooks
 .ipynb_checkpoints
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Misc
+*.log
+*.txt.bak

@@ -1,9 +1,12 @@
 import os
 import time
 import pandas as pd
+import logging
 from ib_insync import *
-from tqdm import tqdm # 进度条库
+from tqdm import tqdm
 from src.config import DATA_DIR
+
+logger = logging.getLogger("PYL.data_downloader")
 
 class DataDownloader:
     def __init__(self, ib_conn):
@@ -18,8 +21,8 @@ class DataDownloader:
         :param contracts: 合约对象列表 (必须先 Qualify)
         :param duration: 下载多长时间的数据，默认 3 年
         """
-        print(f"📉 准备下载 {len(contracts)} 只股票的日线数据...")
-        print(f"📂 数据将保存在: {self.price_dir}")
+        logger.info(f"Preparing to download {len(contracts)} stock price histories...")
+        logger.info(f"Data will be saved to: {self.price_dir}")
 
         success_count = 0
         failure_list = []
@@ -30,7 +33,7 @@ class DataDownloader:
             local_path = self.price_dir / f"{symbol}.csv"
 
             # 策略：如果本地已经有刚下载的文件，可以选择跳过 (这里为了演示，默认覆盖)
-            # if local_path.exists(): continue 
+            if local_path.exists(): continue 
 
             try:
                 # 1. 请求数据
@@ -67,11 +70,9 @@ class DataDownloader:
             # 我们保守一点，每次请求完休息 0.5 到 1 秒
             self.ib.sleep(0.5) 
 
-        # --- 总结报告 ---
-        print("\n" + "="*30)
-        print(f"✅ 下载完成报告")
-        print(f"成功: {success_count} 只")
-        print(f"失败: {len(failure_list)} 只")
+        # --- Summary Report ---
+        logger.info("Download report:")
+        logger.info(f"Success: {success_count} stocks")
+        logger.info(f"Failed: {len(failure_list)} stocks")
         if failure_list:
-            print("失败列表:", failure_list[:10]) # 只打印前10个
-        print("="*30)
+            logger.warning(f"Failed list (first 10): {failure_list[:10]}")

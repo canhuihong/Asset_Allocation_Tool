@@ -1,134 +1,159 @@
-import pandas as pd
-from ib_insync import IB, Stock
-# 注意：这里我们导入的是新的 StockUniverse
-from src.universe import StockUniverse 
-from src.data_downloader import DataDownloader
-# 注意：这里导入的是我们之前改好的 Yahoo 版数据管理器 (类名没变)
-from src.fmp_data import FMPDataManager 
-from src.factor_engine import FactorEngine
-from src.config import IB_HOST, IB_PORT, IB_CLIENT_ID, DATA_DIR
+import sys
+import os
+import logging
+import datetime
+import pandas as pd  # 记得确保导入 pandas
+from pathlib import Path
+
+# 引入各个模块
+from src.config import DATA_DIR, OUTPUT_DIR
+from src.data_manager import DataManager 
+from src.macro_regime import MacroRegime
+from src.portfolio_analyzer import PortfolioAnalyzer
+from src.macro_engine import MacroEngine
+from src.backtest_engine import BacktestEngine
+from src.optimizer import PortfolioOptimizer
+from src.reporting import ReportManager
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger("PYL.Main")
+
+def load_portfolio_from_csv(file_path):
+    """
+    从 CSV 文件读取持仓配置
+    格式要求: 两列，表头为 Ticker, Weight
+    """
+    if not os.path.exists(file_path):
+        logger.warning(f"⚠️ Portfolio file not found: {file_path}")
+        logger.warning("-> Falling back to default Hardcoded Portfolio.")
+        return None
+
+    try:
+        df = pd.read_csv(file_path)
+        # 简单清洗：去空格，大写
+        df['Ticker'] = df['Ticker'].astype(str).str.strip().str.upper()
+        
+        # 转换成字典 {Ticker: Weight}
+        portfolio = dict(zip(df['Ticker'], df['Weight']))
+        
+        # 检查权重之和
+        total_weight = sum(portfolio.values())
+        if abs(total_weight - 1.0) > 0.05:
+            logger.warning(f"⚠️ Warning: Portfolio weights sum to {total_weight:.2f}, not 1.0")
+            
+        logger.info(f"✅ Loaded portfolio from {file_path} ({len(portfolio)} assets)")
+        return portfolio
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to read portfolio CSV: {e}")
+        return None
 
 def main():
+    logger.info("==========================================")
+    logger.info("🚀 Starting Quant Macro Lab (Engineering Mode)")
+    logger.info("==========================================")
+    
+    # 0. 准备输出目录
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_dir = OUTPUT_DIR / timestamp
+    run_dir.mkdir(parents=True, exist_ok=True)
+    
+    reporter = ReportManager(run_dir)
+    logger.info(f"📂 Output Directory: {run_dir}")
+    
     # ==========================================
-    # 阶段 1: 构建混合股票池 (大盘 + 小盘)
+    # Phase 0: 宏观周期
     # ==========================================
-    print("\n=== 阶段 1: 构建混合股票池 ===")
-    universe_loader = StockUniverse()
-    
-    # 1. 获取大盘股 (S&P 500)
-    print("正在获取 S&P 500 列表...")
-    sp500 = universe_loader.get_sp500()
-    
-    # 2. 获取小盘股 (S&P 600)
-    print("正在获取 S&P 600 列表...")
-    sp600 = universe_loader.get_sp600()
-    
-    print(f"📚 统计: S&P500 共 {len(sp500)} 只, S&P600 共 {len(sp600)} 只")
-    
-    # --- 🎯 关键策略：构建 100 只股票的混合样本 ---
-    # 取 S&P 500 的前 50 只 (代表 Big Cap)
-    # 取 S&P 600 的前 50 只 (代表 Small Cap)
-    target_tickers = sp500[:50] + sp600[:50]
-    
-    # 去重 (以防万一)
-    target_tickers = list(set(target_tickers))
-    
-    print(f"🚀 本次任务目标: {len(target_tickers)} 只股票 (50 Big + 50 Small)")
-
-    # ==========================================
-    # 阶段 2: 下载价格数据 (IBKR)
-    # ==========================================
-    # 如果你不想每次都重新下载 IBKR 价格，可以把下面这段代码注释掉
-    print("\n=== 阶段 2: 下载价格数据 (IBKR) ===")
-    ib = IB()
+    logger.info("\n--- Phase 0: Macro Regime Detection ---")
     try:
-        print(f"🔌 正在连接 IBKR (端口 {IB_PORT})...")
-        ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID)
-
-        # 创建合约对象
-        # 注意：IBKR 对于 S&P 600 的小票通常也能用 SMART 路由
-        contracts = []
-        for symbol in target_tickers:
-            contracts.append(Stock(symbol, 'SMART', 'USD'))
-        
-        print("🔍 正在验证合约有效性 (Qualifying)...")
-        # 批量验证，IB 会自动填充 conId
-        # 这一步可能会剔除掉一些 IBKR 不支持的冷门小票
-        qualified_contracts = ib.qualifyContracts(*contracts)
-        print(f"✅ 成功验证 {len(qualified_contracts)} 个合约")
-        
-        # 启动下载
-        downloader = DataDownloader(ib)
-        # 下载过去 2 年的数据
-        downloader.download_history(qualified_contracts, duration='2 Y') 
-
+        mr = MacroRegime()
+        regime = mr.determine_regime()
+        logger.info(f"✅ Current Regime Detected: [{regime}]")
+        reporter.add_text(f"Current Macro Regime: {regime}")
     except Exception as e:
-        print(f"❌ IBKR 连接或下载部分出错: {e}")
-    finally:
-        ib.disconnect()
-        print("🔌 连接已断开")
+        logger.error(f"❌ Phase 0 Failed: {e}")
+        reporter.add_text("Macro Regime: Detection Failed")
 
     # ==========================================
-    # 阶段 3: 下载基本面数据 (Yahoo Finance)
+    # Phase 1: 数据库检查
     # ==========================================
-    print("\n=== 阶段 3: 下载基本面数据 (Yahoo) ===")
-    fmp_manager = FMPDataManager() # 虽然名字叫 FMP，但其实我们已经换成了 Yahoo 内核
-    
-    success_count = 0
-    print(f"正在处理 {len(target_tickers)} 只股票的基本面...")
-    
-    for symbol in target_tickers:
-        # 这一步会去 Yahoo 下载历史股本和账面价值
-        df_fund = fmp_manager.get_fama_french_fundamentals(symbol)
-        
-        if df_fund is not None and not df_fund.empty:
-            success_count += 1
-            # 简单打印进度，不刷屏
-            # print(f"✅ {symbol} 获取成功")
-        else:
-            print(f"⚠️ {symbol} 基本面获取失败")
-    
-    print(f"✅ 基本面数据处理完成: {success_count}/{len(target_tickers)}")
+    logger.info("\n--- Phase 1: Data Check ---")
+    db_path = DATA_DIR / "quant_lab.db"
+    if not db_path.exists():
+        logger.critical(f"⛔ Database not found at {db_path}!")
+        return
 
     # ==========================================
-    # 阶段 4: 计算 Fama-French 因子
+    # Phase 2：读取外部配置文件
     # ==========================================
-    print("\n=== 阶段 4: 计算 Fama-French 因子 ===")
-    engine = FactorEngine()
-    
-    # 运行引擎
-    factors_df = engine.run()
-    
-    if factors_df is not None and not factors_df.dropna().empty:
-        print("✅ 因子计算完成！预览如下:")
-        print(factors_df.tail())
+    logger.info("\n--- Phase 2: Getting Portfolio ---")
+    try:
+        csv_path = DATA_DIR / "my_portfolio.csv"  # 你的文件名
+        my_portfolio = load_portfolio_from_csv(csv_path)
+    except Exception as e:
+        logger.error(f"❌ Phase 2 Portfolio Reading Failed: {e}")
+        reporter.add_text("Porfolio Reading: No files")
+
+    # ==========================================
+    # Phase 3: 微观归因
+    # ==========================================
+    logger.info("\n--- Phase 3: Micro Attribution ---")
+    try:
+        pa = PortfolioAnalyzer()
+        fig = pa.analyze(my_portfolio)
+        if fig: reporter.add_figure(fig, "micro_attribution")
+    except Exception as e: logger.error(f"Phase 4 Error: {e}")
+
+    # ==========================================
+    # Phase 4: 宏观敏感度
+    # ==========================================
+    logger.info("\n--- Phase 4: Macro Sensitivity ---")
+    try:
+        me = MacroEngine()
+        fig = me.run_analysis(my_portfolio)
+        if fig: reporter.add_figure(fig, "macro_sensitivity")
+    except Exception as e: logger.error(f"Phase 5 Error: {e}")
+
+    # ==========================================
+    # Phase 5: 回测
+    # ==========================================
+    logger.info("\n--- Phase 5: Full-Market Backtest ---")
+    try:
+        be = BacktestEngine()
+        fig = be.run_backtest("Trend_Following_Plus", top_n=2, min_history_days=750, mom_window=126)
+        if fig: reporter.add_figure(fig, "backtest")
+    except Exception as e: logger.error(f"Phase 6 Error: {e}")
+
+    # ==========================================
+    # Phase 6: 优化
+    # ==========================================
+    logger.info("\n--- Phase 6: Portfolio Optimization ---")
+    try:
+        opt = PortfolioOptimizer()
+        fig, portfolios = opt.optimize()
         
-        # 保存结果
-        output_file = DATA_DIR / "my_ff_factors.csv"
-        factors_df.to_csv(output_file)
-        print(f"📂 因子序列已保存至: {output_file}")
-        
-        # --- 可视化 ---
-        import matplotlib.pyplot as plt
-        
-        # 计算累积收益率
-        cum_factors = (1 + factors_df).cumprod()
-        
-        plt.figure(figsize=(10, 6))
-        # 画 SMB (小盘因子)
-        plt.plot(cum_factors.index, cum_factors['SMB'], label='SMB (Small Minus Big)', color='orange', linewidth=2)
-        # 画 HML (价值因子)
-        plt.plot(cum_factors.index, cum_factors['HML'], label='HML (High Minus Low)', color='purple', linewidth=2)
-        
-        plt.title('Custom Fama-French Factors (S&P 500 + S&P 600)', fontsize=14)
-        plt.xlabel('Date')
-        plt.ylabel('Cumulative Return')
-        plt.legend()
-        plt.grid(True, linestyle='--', alpha=0.5)
-        plt.tight_layout()
-        plt.show()
-    else:
-        print("❌ 因子计算结果为空，可能是数据不足或全部为 NaN。")
+        if fig: reporter.add_figure(fig, "frontier")
+            
+        if portfolios:
+            logger.info(f"💾 Saving {len(portfolios)} optimized portfolios...")
+            for filename, df in portfolios.items():
+                reporter.save_data(df, filename)
+    except Exception as e: 
+        logger.error(f"Phase 7 Error: {e}")
+
+    # ==========================================
+    # 结束
+    # ==========================================
+    path = reporter.generate_html()
+    logger.info(f"🎉 Report generated: {path}")
+    if os.name == 'nt': 
+        try: os.startfile(path)
+        except: pass
 
 if __name__ == "__main__":
     main()
