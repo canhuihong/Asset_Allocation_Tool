@@ -3,11 +3,11 @@ import numpy as np
 import logging
 import scipy.optimize as sco
 import matplotlib.pyplot as plt
-import sqlite3
 import pandas_datareader.data as web
 import datetime
 import random
 from src.data_manager import DataManager
+from src.config import FULL_BLOCKLIST # ✅ 引入统一配置
 
 logger = logging.getLogger("PYL.optimizer")
 
@@ -15,31 +15,27 @@ class PortfolioOptimizer:
     def __init__(self):
         self.db = DataManager()
 
-    def _get_all_tickers(self):
+    def _get_valid_universe(self):
         """
-        获取全市场股票池，执行严格的排除名单。
+        获取全市场股票池，并应用 Config 中的排除名单。
+        ✅ 逻辑更新：不再直接操作 SQL，而是调用 DataManager 接口
         """
         try:
-            with sqlite3.connect(self.db.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT DISTINCT ticker FROM stock_prices")
-                tickers = [row[0] for row in cursor.fetchall()]
+            # 1. 从 DB 获取所有 Ticker
+            raw_tickers = self.db.get_all_tickers_in_db()
             
-            # 完整的排除列表 (Full Exclude List)
-            exclude = [
-                'SPY', 'QQQ', 'TLT', 'GLD', 'IWM', 'USDOLLAR', '^GSPC', '^VIX', '^IXIC',
-                'IVV', 'VOO', 'AGG', 'BND', 'LQD', 'HYG', 'EEM', 'EFA', 'SLV', 'USO',
-                'SHY', 'IEF', 'TIP', 'VNQ', 'XLK', 'XLF', 'XLV', 'XLE', 'XLY', 'XLP'
-            ]
-            return [t for t in tickers if t not in exclude]
+            # 2. 应用统一黑名单进行过滤
+            valid_tickers = [t for t in raw_tickers if t not in FULL_BLOCKLIST]
+            
+            logger.info(f"Optimizer Universe: {len(raw_tickers)} raw -> {len(valid_tickers)} cleaned.")
+            return valid_tickers
         except Exception as e:
-            logger.error(f"Error fetching tickers from DB: {e}")
+            logger.error(f"Error fetching tickers: {e}")
+            # 保底列表
             return ['AAPL', 'MSFT', 'NVDA', 'JPM'] 
 
     def _get_risk_free_rate(self):
-        """
-        动态获取无风险利率 (3个月美债 DGS3MO)。
-        """
+        """动态获取无风险利率 (3个月美债 DGS3MO)"""
         default_rf = 0.04
         try:
             end = datetime.datetime.now()
@@ -56,17 +52,18 @@ class PortfolioOptimizer:
     def optimize(self):
         logger.info("Initializing Full-Market Optimization (Max Features)...")
         
-        # 1. 获取股票池
-        all_tickers = self._get_all_tickers()
-        # 限制 50 只以保证计算边界线时不卡死
+        # 1. 获取清洗后的股票池
+        all_tickers = self._get_valid_universe()
+        
+        # 限制 50 只以保证计算速度 (可根据机器性能调整)
         if len(all_tickers) > 50:
             target_tickers = random.sample(all_tickers, 50)
             logger.info(f"Selecting 50 random stocks from {len(all_tickers)} available.")
         else:
             target_tickers = all_tickers
             
-        # 2. 获取数据
-        tickers_to_fetch = target_tickers + ['SPY'] if 'SPY' not in target_tickers else target_tickers
+        # 2. 获取数据 (需包含 SPY 作为基准参考，即便不在目标池中)
+        tickers_to_fetch = list(set(target_tickers + ['SPY']))
         raw_df = self.db.get_aligned_data(tickers_to_fetch)
         
         if raw_df is None or raw_df.empty:
@@ -75,9 +72,10 @@ class PortfolioOptimizer:
             
         rf_rate = self._get_risk_free_rate()
             
-        # 3. 数据准备
-        price_cols = [c for c in raw_df.columns if c not in ['smb', 'hml', 'mom', 'mkt', 'SPY']]
-        prices = raw_df[price_cols]
+        # 3. 数据准备 (仅保留目标池的股票价格)
+        # 过滤掉因子列和不在 target_tickers 里的列
+        valid_cols = [c for c in raw_df.columns if c in target_tickers]
+        prices = raw_df[valid_cols]
         returns = prices.pct_change().dropna()
         
         if returns.shape[1] < 2 or len(returns) < 60: 
@@ -104,8 +102,6 @@ class PortfolioOptimizer:
         
         star_points = []
         portfolios = {} 
-
-        # 变量用于画线
         min_vol_val = 0
         max_ret_val = 0
 
@@ -115,7 +111,7 @@ class PortfolioOptimizer:
             if res_mv.success:
                 mv_vol = res_mv.fun
                 mv_ret = np.sum(res_mv.x * mean_returns)
-                min_vol_val = mv_vol # 记录用于画线
+                min_vol_val = mv_vol
                 
                 star_points.append((mv_vol, mv_ret, "Min Volatility", "gold"))
                 logger.info(f"✅ [Min Vol] Solved! Vol: {mv_vol:.1%}")
@@ -130,7 +126,7 @@ class PortfolioOptimizer:
             if res_ms.success:
                 ms_vol = np.sqrt(np.dot(res_ms.x.T, np.dot(cov_matrix, res_ms.x)))
                 ms_ret = np.sum(res_ms.x * mean_returns)
-                max_ret_val = ms_ret # 记录用于画线
+                max_ret_val = ms_ret
                 
                 star_points.append((ms_vol, ms_ret, "Max Sharpe", "red"))
                 logger.info(f"✅ [Max Sharpe] Solved! Sharpe: {(ms_ret-rf_rate)/ms_vol:.2f}")
@@ -144,27 +140,19 @@ class PortfolioOptimizer:
             df_eq = pd.DataFrame({'Ticker': asset_names, 'Weight': [1.0/num_assets]*num_assets})
             portfolios['weights_equal_backup.csv'] = df_eq
 
-        # ==========================================
-        # 🟢 D. 生成有效前沿曲线 (Efficient Frontier Line)
-        # 这就是之前被缩掉的关键部分！
-        # ==========================================
+        # --- D. 生成有效前沿曲线 (Efficient Frontier Line) ---
         frontier_x = []
         frontier_y = []
         
         if min_vol_val > 0 and max_ret_val > 0:
             logger.info("📐 Calculating Efficient Frontier Curve (20 points)...")
-            # 在最小波动和最大收益之间插值 20 个点
-            target_returns = np.linspace(min_vol_val, max_ret_val * 1.2, 20) # 用收益率更合理，这里简化用线性插值
-            # 修正：应该在收益率区间上插值
             min_ret = star_points[0][1] if star_points else 0
             max_ret = max(p[1] for p in star_points) if star_points else 0.5
             target_returns = np.linspace(min_ret, max_ret * 1.1, 20)
 
             for trets in target_returns:
-                # 约束：权重和=1 且 收益率=目标值
                 cons = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1},
                         {'type': 'eq', 'fun': lambda x: np.sum(x * mean_returns) - trets})
-                
                 try:
                     res = sco.minimize(portfolio_volatility, init_guess, method='SLSQP', bounds=bounds, constraints=cons)
                     if res.success:
@@ -172,9 +160,7 @@ class PortfolioOptimizer:
                         frontier_y.append(trets)     # Return
                 except: pass
 
-        # ==========================================
-        # E. 蒙特卡洛模拟 (5000次)
-        # ==========================================
+        # --- E. 蒙特卡洛模拟 (5000次) ---
         logger.info("🎲 Running Monte Carlo (5000 iters)...")
         results = np.zeros((3, 5000))
         for i in range(5000):
@@ -183,7 +169,6 @@ class PortfolioOptimizer:
             p_ret = np.sum(w * mean_returns)
             results[:,i] = [p_std, p_ret, (p_ret-rf_rate)/(p_std+1e-9)]
             
-        # 传入所有数据进行绘图
         fig = self._plot(results, star_points, frontier_x, frontier_y, len(target_tickers), rf_rate)
         
         return fig, portfolios
@@ -192,18 +177,17 @@ class PortfolioOptimizer:
         try:
             fig, ax = plt.subplots(figsize=(10, 6))
             
-            # 1. 散点云 (Monte Carlo)
+            # 1. 散点云
             sc = ax.scatter(results[0,:], results[1,:], c=results[2,:], 
                            cmap='viridis', s=10, alpha=0.4, label='Random Portfolios')
             cbar = plt.colorbar(sc)
             cbar.set_label(f'Sharpe Ratio (Rf={rf_rate:.1%})', rotation=270, labelpad=15)
             
-            # 2. 🟢 曲线 (Frontier Line)
-            # 如果算出来了，画一条黑色虚线
+            # 2. 曲线
             if len(frontier_x) > 1:
                 ax.plot(frontier_x, frontier_y, 'k--', linewidth=2.5, label='Efficient Frontier')
             
-            # 3. 特殊点 (MinVol, MaxSharpe)
+            # 3. 特殊点
             for (vol, ret, label, color) in star_points:
                 ax.scatter(vol, ret, marker='*', color=color, s=300, 
                           edgecolors='black', linewidth=1.5, label=label, zorder=10)

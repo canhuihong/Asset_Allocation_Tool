@@ -2,8 +2,8 @@ import pandas as pd
 import numpy as np
 import logging
 import matplotlib.pyplot as plt
-import sqlite3
 from src.data_manager import DataManager
+from src.config import FULL_BLOCKLIST # ✅ 引入统一配置
 
 logger = logging.getLogger("PYL.backtest_engine")
 
@@ -13,36 +13,18 @@ class BacktestEngine:
         
     def _get_universe(self):
         """
-        获取全市场股票列表 
-        🔥 关键修复：必须严格剔除宏观因子和非股票资产，
-        否则会导致数据对齐时长度被切短，甚至归零。
+        获取全市场股票列表 (已清洗)
+        ✅ 逻辑更新：调用接口 + 使用 Config 黑名单
         """
         try:
-            with sqlite3.connect(self.db.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT DISTINCT ticker FROM stock_prices")
-                
-                # 1. 基础排除 (指数 ETF 等)
-                basic_exclude = ['SPY', 'QQQ', 'TLT', 'GLD', 'IWM', 'USDOLLAR', '^GSPC', '^VIX']
-                
-                # 2. 🔥 宏观因子排除
-                # 必须把它们拉黑，否则回测引擎会试图交易“CPI通胀率”，导致逻辑崩溃
-                macro_exclude = [
-                    'DGS10', 'T5YIE', 'T10Y2Y', 'BAMLC0A0CM', # 利率/信用
-                    'VIXCLS', 'DCOILWTICO', 'DTWEXBGS',       # VIX/油/美元
-                    'CPIAUCSL', 'M2SL', 'UNRATE'              # 其他可能的宏观数据
-                ]
-                
-                exclude = basic_exclude + macro_exclude
-                
-                all_tickers = [row[0] for row in cursor.fetchall()]
-                
-                # 过滤
-                clean_list = [t for t in all_tickers if t not in exclude]
-                
-                # 3. 简单的日志，让你知道回测到底在跑谁
-                logger.info(f"Scanning Universe: Found {len(all_tickers)} raw, {len(clean_list)} valid stocks.")
-                return clean_list
+            # 1. 获取原始列表
+            raw_tickers = self.db.get_all_tickers_in_db()
+            
+            # 2. 应用黑名单 (过滤 SPY, VIX, 宏观数据等)
+            clean_list = [t for t in raw_tickers if t not in FULL_BLOCKLIST]
+            
+            logger.info(f"Scanning Universe: Found {len(raw_tickers)} raw, {len(clean_list)} valid stocks.")
+            return clean_list
         except Exception as e:
             logger.error(f"Failed to get universe: {e}")
             return ['AAPL', 'MSFT'] # 保底
@@ -58,8 +40,7 @@ class BacktestEngine:
 
         logger.info(f"🔍 [Universe Scan] Preparing to backtest {len(universe)} stocks...")
         
-        # 1. 获取全量数据 (价格 + SPY基准)
-        # 注意：这里我们明确只取 universe + SPY，不取别的
+        # 1. 获取全量数据 (目标股票 + SPY基准)
         raw_df = self.db.get_aligned_data(universe + ['SPY'])
         
         if raw_df is None or raw_df.empty: 
@@ -83,15 +64,13 @@ class BacktestEngine:
                 valid_cols.append(col)
             else:
                 dropped_count += 1
-                # 调试打印，看看到底是谁被剔除了
-                # logger.debug(f"Dropped {col}: {count} days < {min_history_days}")
         
         logger.info(f"📉 [Filtering] Dropped {dropped_count} short-history stocks. Retaining {len(valid_cols)} candidates.")
         
         # 重新切片并去空
         df_clean = raw_df[valid_cols].dropna()
         
-        if df_clean.empty or len(df_clean) < 126: # 至少要有半年的数据才能算动量
+        if df_clean.empty or len(df_clean) < 126:
             logger.warning(f"❌ Data became empty after alignment. Overlap length: {len(df_clean)}")
             return None
 
@@ -99,7 +78,9 @@ class BacktestEngine:
         # ⚙️ 步骤 2: 数据准备
         # ==========================================
         # 提取个股价格 (排除因子列和 SPY)
-        price_cols = [c for c in df_clean.columns if c not in ['smb', 'hml', 'mom', 'mkt', 'SPY']]
+        # 这里的排除是为了防止 config 中漏掉的因子列混入
+        exclude_internal = ['smb', 'hml', 'mom', 'mkt', 'SPY']
+        price_cols = [c for c in df_clean.columns if c not in exclude_internal]
         prices = df_clean[price_cols]
         
         if prices.empty:
@@ -121,7 +102,7 @@ class BacktestEngine:
         # 🚦 步骤 3: 大盘风控 (MA200)
         # ==========================================
         spy_ma200 = spy.rolling(window=200).mean()
-        # 昨天的收盘价 > 昨天的200日均线 = 今天敢买
+        # 昨天的收盘价 > 昨天的200日均线 = 1 (看多)，否则 0 (空仓)
         market_signal = (spy > spy_ma200).astype(int).shift(1).fillna(1)
         
         # ==========================================
@@ -138,7 +119,7 @@ class BacktestEngine:
         # ==========================================
         # ⚖️ 步骤 5: 交易执行 (含大盘风控)
         # ==========================================
-        # 如果 Market=0，仓位全平
+        # 只有在 Market Signal 为 1 时才持仓
         final_weights = raw_weights.mul(market_signal, axis=0)
         
         stock_daily_ret = prices.pct_change().fillna(0)
@@ -146,7 +127,7 @@ class BacktestEngine:
         # 策略收益 = 昨天权重 * 今天个股涨幅
         gross_strat_ret = (final_weights.shift(1) * stock_daily_ret).sum(axis=1)
         
-        # 交易成本 (Impact Cost + Commission)
+        # 交易成本 (Turnover * Cost Rate)
         turnover = abs(final_weights - final_weights.shift(1)).fillna(0).sum(axis=1)
         cost_rate = 0.001 # 万10
         txn_costs = turnover * cost_rate
@@ -164,16 +145,17 @@ class BacktestEngine:
         total_return = cum_strat.iloc[-1] / 100 - 1
         ann_ret = (1 + total_return) ** (1 / years) - 1 if years > 0 else 0
         
-        ann_vol = net_strat_ret.std() * np.sqrt(252)
+        # Sharpe
         rf = 0.04 
         excess_ret = net_strat_ret - (rf / 252)
         sharpe = (excess_ret.mean() / excess_ret.std()) * np.sqrt(252) if excess_ret.std() > 0 else 0
         
+        # Max Drawdown
         roll_max = cum_strat.cummax()
         drawdown = (cum_strat - roll_max) / roll_max
         max_dd = drawdown.min()
         
-        # 胜率
+        # Win Rate
         win_days = len(net_strat_ret[net_strat_ret > 0])
         trade_days = len(net_strat_ret[net_strat_ret != 0])
         win_rate = win_days / trade_days if trade_days > 0 else 0
