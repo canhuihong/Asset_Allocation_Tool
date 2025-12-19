@@ -2,7 +2,7 @@ import sys
 import os
 import logging
 import datetime
-import pandas as pd  # 记得确保导入 pandas
+import pandas as pd
 from pathlib import Path
 
 # 引入各个模块
@@ -26,22 +26,17 @@ logger = logging.getLogger("PYL.Main")
 def load_portfolio_from_csv(file_path):
     """
     从 CSV 文件读取持仓配置
-    格式要求: 两列，表头为 Ticker, Weight
+    格式要求: Ticker, Weight
     """
     if not os.path.exists(file_path):
         logger.warning(f"⚠️ Portfolio file not found: {file_path}")
-        logger.warning("-> Falling back to default Hardcoded Portfolio.")
         return None
 
     try:
         df = pd.read_csv(file_path)
-        # 简单清洗：去空格，大写
         df['Ticker'] = df['Ticker'].astype(str).str.strip().str.upper()
-        
-        # 转换成字典 {Ticker: Weight}
         portfolio = dict(zip(df['Ticker'], df['Weight']))
         
-        # 检查权重之和
         total_weight = sum(portfolio.values())
         if abs(total_weight - 1.0) > 0.05:
             logger.warning(f"⚠️ Warning: Portfolio weights sum to {total_weight:.2f}, not 1.0")
@@ -85,7 +80,7 @@ def main():
     logger.info("\n--- Phase 1: Data Check ---")
     db_path = DATA_DIR / "quant_lab.db"
     if not db_path.exists():
-        logger.critical(f"⛔ Database not found at {db_path}!")
+        logger.critical(f"⛔ Database not found at {db_path}! Please run 'python init_data.py' first.")
         return
 
     # ==========================================
@@ -93,31 +88,37 @@ def main():
     # ==========================================
     logger.info("\n--- Phase 2: Getting Portfolio ---")
     try:
-        csv_path = DATA_DIR / "my_portfolio.csv"  # 你的文件名
+        csv_path = DATA_DIR / "my_portfolio.csv"
         my_portfolio = load_portfolio_from_csv(csv_path)
     except Exception as e:
         logger.error(f"❌ Phase 2 Portfolio Reading Failed: {e}")
-        reporter.add_text("Porfolio Reading: No files")
+        my_portfolio = None
+        reporter.add_text("Portfolio Reading: No files")
 
     # ==========================================
-    # Phase 3: 微观归因
+    # Phase 3: 微观归因 (现在应该能读到因子了)
     # ==========================================
     logger.info("\n--- Phase 3: Micro Attribution ---")
-    try:
-        pa = PortfolioAnalyzer()
-        fig = pa.rolling_analyze(my_portfolio)
-        if fig: reporter.add_figure(fig, "micro_attribution")
-    except Exception as e: logger.error(f"Phase 4 Error: {e}")
+    if my_portfolio:
+        try:
+            pa = PortfolioAnalyzer()
+            fig = pa.analyze(my_portfolio)
+            if fig: reporter.add_figure(fig, "micro_attribution")
+            else: logger.warning("⚠️ Micro Attribution produced no figure (check data sufficiency).")
+        except Exception as e: logger.error(f"Phase 3 Error: {e}")
+    else:
+        logger.warning("⚠️ Skipping Phase 3 (No Portfolio Loaded)")
 
     # ==========================================
     # Phase 4: 宏观敏感度
     # ==========================================
     logger.info("\n--- Phase 4: Macro Sensitivity ---")
-    try:
-        me = MacroEngine()
-        fig = me.run_analysis(my_portfolio)
-        if fig: reporter.add_figure(fig, "macro_sensitivity")
-    except Exception as e: logger.error(f"Phase 5 Error: {e}")
+    if my_portfolio:
+        try:
+            me = MacroEngine()
+            fig = me.run_analysis(my_portfolio)
+            if fig: reporter.add_figure(fig, "macro_sensitivity")
+        except Exception as e: logger.error(f"Phase 4 Error: {e}")
 
     # ==========================================
     # Phase 5: 回测
@@ -127,7 +128,7 @@ def main():
         be = BacktestEngine()
         fig = be.run_backtest("Trend_Following_Plus", top_n=2, min_history_days=750, mom_window=126)
         if fig: reporter.add_figure(fig, "backtest")
-    except Exception as e: logger.error(f"Phase 6 Error: {e}")
+    except Exception as e: logger.error(f"Phase 5 Error: {e}")
 
     # ==========================================
     # Phase 6: 优化
@@ -144,7 +145,7 @@ def main():
             for filename, df in portfolios.items():
                 reporter.save_data(df, filename)
     except Exception as e: 
-        logger.error(f"Phase 7 Error: {e}")
+        logger.error(f"Phase 6 Error: {e}")
 
     # ==========================================
     # 结束
